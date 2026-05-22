@@ -92,20 +92,23 @@ def _build_prompt(doc: dict, kb_slug: str) -> str:
     )
 
 
-def _mcp_server_config(workspace: str) -> dict[str, dict[str, Any]]:
+def _mcp_server_config(workspace: str):
     """Build the inline MCP server config for the agent.
 
     Mirrors the user's `.cursor/mcp.json` so the agent talks to the same
     local server (and same workspace) the user is debugging against.
     Computes paths from this file's location to avoid environment-specific
-    hardcoding.
+    hardcoding. Uses the SDK's typed `StdioMcpServerConfig` rather than a raw
+    dict so any schema drift surfaces at the SDK boundary, not at runtime.
     """
+    from cursor_sdk import StdioMcpServerConfig
+
     repo_root = Path(__file__).resolve().parent.parent.parent
     return {
-        "llmwiki": {
-            "command": sys.executable,
-            "args": [str(repo_root / "llmwiki"), "mcp", workspace],
-        }
+        "llmwiki": StdioMcpServerConfig(
+            command=sys.executable,
+            args=[str(repo_root / "llmwiki"), "mcp", workspace],
+        )
     }
 
 
@@ -204,7 +207,9 @@ async def run_ingest(
         return
 
     try:
-        from cursor_sdk import AsyncClient, LocalAgentOptions, CursorAgentError
+        from cursor_sdk import (
+            AsyncClient, AsyncAgent, AgentOptions, LocalAgentOptions, CursorAgentError,
+        )
     except ImportError as e:
         yield IngestEvent("error", {
             "phase": "import",
@@ -223,17 +228,21 @@ async def run_ingest(
 
         try:
             async with await AsyncClient.launch_bridge(workspace=workspace) as client:
-                async with await client.agents.create(
+                # AgentOptions carries `mcp_servers`; the create_agent kwargs
+                # surface intentionally doesn't expose it, only `model`/`local`/
+                # `cloud`/etc. Pass the full options object positionally.
+                options = AgentOptions(
                     model=settings.AGENT_MODEL,
                     api_key=settings.CURSOR_API_KEY,
                     local=LocalAgentOptions(cwd=workspace),
                     mcp_servers=mcp_servers,
-                ) as agent:
+                )
+                async with await AsyncAgent.create(options, client=client) as agent:
                     agent_id = getattr(agent, "agent_id", None)
                     yield IngestEvent("agent_created", {"agent_id": agent_id})
 
                     run = await agent.send(prompt)
-                    run_id = getattr(run, "id", None)
+                    run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
                     logger.info("Ingest run started: agent_id=%s run_id=%s doc=%s", agent_id, run_id, doc_id)
                     yield IngestEvent("run_started", {"run_id": run_id})
 

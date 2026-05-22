@@ -18,8 +18,7 @@ opendataloader-pdf==2.3.0
 aiosqlite==0.22.1
 watchfiles==1.1.0
 slowapi==0.1.9
-# Pin once installed: `pip install cursor-sdk` then replace with the resolved version.
-cursor-sdk
+cursor-sdk==0.1.5
 # Pinned to override vulnerable transitive resolutions.
 aiohttp==3.13.5
 requests==2.33.1
