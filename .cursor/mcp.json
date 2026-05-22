@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "llmwiki-demo": {
+      "command": "C:\\SweProjects\\llmwiki\\api\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\SweProjects\\llmwiki\\llmwiki",
+        "mcp",
+        "C:\\SweProjects\\llmwiki-demo"
+      ]
+    }
+  }
+}

@@ -48,7 +48,7 @@ def cmd_init(workspace: str) -> None:
 
     # Initialize SQLite
     import sqlite3
-    schema_path = API_DIR / "infra" / "db" / "sqlite_schema.sql"
+    schema_path = REPO_ROOT / "shared" / "sqlite_schema.sql"
     if not schema_path.exists():
         print(f"Error: schema not found at {schema_path}", file=sys.stderr)
         sys.exit(1)
@@ -253,10 +253,16 @@ def cmd_mcp(workspace: str) -> None:
     if not (ws / ".llmwiki" / "index.db").exists():
         cmd_init(str(ws))
 
-    os.execvp(
-        sys.executable,
-        [sys.executable, "-m", "local_server", "--workspace", str(ws)],
-    )
+    # Run the stdio server in-process. Avoid os.execvp: on Windows it is emulated
+    # as spawn-and-exit, which adds an extra process boundary across which Cursor's
+    # stdin/stdout pipes must be re-inherited. Importing and calling main() keeps
+    # the original process — the one Cursor opened the pipes against — as the one
+    # that services the MCP handshake.
+    os.chdir(str(MCP_DIR))
+    sys.path.insert(0, str(MCP_DIR))
+    sys.argv = ["local_server", "--workspace", str(ws)]
+    import local_server
+    local_server.main()
 
 
 def cmd_mcp_config(workspace: str, name: str | None = None) -> None:
@@ -267,8 +273,8 @@ def cmd_mcp_config(workspace: str, name: str | None = None) -> None:
     config = {
         "mcpServers": {
             server_name: {
-                "command": llmwiki_path,
-                "args": ["mcp", str(ws)],
+                "command": sys.executable,
+                "args": [llmwiki_path, "mcp", str(ws)],
             }
         }
     }

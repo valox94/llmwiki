@@ -15,6 +15,17 @@ import sys
 import uuid
 from pathlib import Path
 
+# Force UTF-8 on stdio. On Windows, the default stderr encoding is the system
+# code page (cp1252 on US installs), which silently mangles non-ASCII log output
+# and, more importantly, removes an entire class of latent encoding bugs from
+# the JSON-RPC stdout stream.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        # Some test runners replace stdio with non-TextIOWrapper objects.
+        pass
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("llmwiki.local")
 
@@ -72,15 +83,15 @@ async def _init_workspace(workspace_path: str) -> None:
         logger.info("Workspace ready: %s", ws)
 
 
-def main():
-    args = _parse_args()
-    workspace = args.workspace_flag or args.workspace
-    workspace = str(Path(workspace).resolve())
+async def _serve(workspace: str) -> None:
+    """Initialize the workspace and run the stdio server on the same event loop.
 
-    sys.modules["local_server"] = sys.modules[__name__]
-
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(_init_workspace(workspace))
+    aiosqlite binds the worker thread / completion callbacks to the loop that
+    is current when `connect()` is awaited; running init on a separate loop and
+    then handing off to `run_stdio_async` strands those callbacks on a dead
+    loop, which on Windows manifests as a handshake that never completes.
+    """
+    await _init_workspace(workspace)
 
     from mcp.server.fastmcp import FastMCP
     from tools import register
@@ -104,8 +115,18 @@ def main():
     async def ping() -> str:
         return "pong"
 
-    logger.info("Local MCP server ready — workspace: %s", workspace)
-    asyncio.run(mcp.run_stdio_async())
+    logger.info("Local MCP server ready - workspace: %s", workspace)
+    await mcp.run_stdio_async()
+
+
+def main():
+    args = _parse_args()
+    workspace = args.workspace_flag or args.workspace
+    workspace = str(Path(workspace).resolve())
+
+    sys.modules["local_server"] = sys.modules[__name__]
+
+    asyncio.run(_serve(workspace))
 
 
 if __name__ == "__main__":
