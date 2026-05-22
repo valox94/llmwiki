@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     # Cursor SDK — drives the optional in-app "ingest with agent" button.
     # Only consulted in local mode; left empty disables the feature gracefully.
     CURSOR_API_KEY: str = ""
-    AGENT_MODEL: str = "auto"
+    # "default" lets the Cursor server pick (current SDK 0.1.5 doesn't accept "auto").
+    # Override in .env to e.g. "claude-sonnet-4-6" for better wiki curation quality.
+    AGENT_MODEL: str = "default"
 
 
 settings = Settings()
