@@ -39,5 +39,10 @@ class Settings(BaseSettings):
 
     SENTRY_DSN: str = ""
 
+    # Cursor SDK — drives the optional in-app "ingest with agent" button.
+    # Only consulted in local mode; left empty disables the feature gracefully.
+    CURSOR_API_KEY: str = ""
+    AGENT_MODEL: str = "auto"
+
 
 settings = Settings()
