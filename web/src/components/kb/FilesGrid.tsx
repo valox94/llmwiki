@@ -6,8 +6,9 @@ import {
   Folder, FileText, NotepadText, Loader2, Trash2,
   Upload, Plus, FolderPlus, ExternalLink, Pencil,
   ChevronLeft, ChevronRight, ArrowUp, ArrowDown, MoreHorizontal,
-  Image, Sheet, Presentation, FileCode, Search, X, Download,
+  Image, Sheet, Presentation, FileCode, Search, X, Download, Sparkles,
 } from 'lucide-react'
+import { AgentIngestPanel } from './AgentIngestPanel'
 import {
   ContextMenu, ContextMenuTrigger, ContextMenuContent,
   ContextMenuItem, ContextMenuSeparator,
@@ -190,6 +191,9 @@ export function FilesGrid({
   const searchInputRef = React.useRef<HTMLInputElement>(null)
   const [folderDialogOpen, setFolderDialogOpen] = React.useState(false)
   const [folderName, setFolderName] = React.useState('')
+
+  // Agent-driven ingest: when set, the panel is open against this source doc.
+  const [ingestDoc, setIngestDoc] = React.useState<{ id: string; filename: string } | null>(null)
 
   // Note editor instance (for rendering formatting buttons in the toolbar)
   const [noteEditor, setNoteEditor] = React.useState<Editor | null>(null)
@@ -538,6 +542,20 @@ export function FilesGrid({
             <button onClick={() => { /* TODO: trigger search in PDF viewer */ }} className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors cursor-pointer" title="Find in document">
               <Search className="size-3.5" />
             </button>
+            <button
+              onClick={() => setIngestDoc({ id: activeDoc.id, filename: activeDoc.filename })}
+              disabled={activeDoc.status !== 'ready' || ingestDoc?.id === activeDoc.id}
+              className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title={
+                activeDoc.status !== 'ready'
+                  ? 'Wait for document processing to finish'
+                  : ingestDoc?.id === activeDoc.id
+                    ? 'Ingest already running'
+                    : 'Ingest with agent — agent reads this source and updates the wiki'
+              }
+            >
+              <Sparkles className="size-3.5" />
+            </button>
             <a href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/v1/documents/${activeDoc.id}/download`} download className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors cursor-pointer" title="Download">
               <Download className="size-3.5" />
             </a>
@@ -638,6 +656,14 @@ export function FilesGrid({
             </div>
           </div>
         </div>
+      )}
+
+      {ingestDoc && (
+        <AgentIngestPanel
+          docId={ingestDoc.id}
+          filename={ingestDoc.filename}
+          onClose={() => setIngestDoc(null)}
+        />
       )}
     </div>
   )
