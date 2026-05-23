@@ -1,13 +1,16 @@
-"""Agent-driven wiki ingestion via the Cursor SDK.
+"""Agent-driven wiki maintenance via the Cursor SDK.
 
-Spawns a local Cursor agent that connects to the workspace's MCP server and
-runs the LLM-Wiki ingest workflow (call `guide`, read the new source, update
-concepts/entities/overview/log) on a single document.
+Two symmetric entry points:
 
-Concurrency: per-workspace asyncio.Lock — the wiki's structural pages
+- `run_ingest`    — agent reads a freshly-uploaded source and produces wiki pages.
+- `run_deprecate` — agent reads a source one last time, updates citing wiki
+                    pages, then the source itself is deleted.
+
+Both share the same SDK orchestration (`_run_agent`); they differ only in the
+prompt and an optional post-run hook (e.g. delete the source after a successful
+deprecation). Concurrency is per-workspace asyncio.Lock — wiki structural pages
 (`overview.md`, `log.md`) are shared mutable state; serializing avoids races
-that the MCP `edit` tool's single-match check would otherwise reject after the
-fact. One agent run per workspace at a time.
+that the MCP `edit` tool's single-match check would reject after the fact.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, Awaitable, Callable, AsyncIterator
 
 from config import settings
 
@@ -40,27 +43,80 @@ def _lock_for(workspace: str) -> asyncio.Lock:
 # ── Event shape exposed to the route layer ───────────────────────────────
 
 @dataclass
-class IngestEvent:
-    """One event in the ingest stream. Maps to a single SSE `data:` line.
+class AgentEvent:
+    """One event in an agent run stream. Maps to a single SSE `data:` line.
 
     The shape is intentionally generic — the route serializes `(type, data)`
     and the UI renders by `type`. Adding a new event kind is one-touch:
-    yield it from `run_ingest`, render it in the UI; nothing in between
+    yield it from the runner, render it in the UI; nothing in between
     needs to change.
     """
     type: str
     data: dict[str, Any]
 
 
-# ── Prompt + MCP server config ───────────────────────────────────────────
+# Back-compat alias for routes/tests that imported the old name.
+IngestEvent = AgentEvent
 
-def _build_prompt(doc: dict, kb_slug: str) -> str:
-    """Compose the ingest prompt from the document row + KB slug.
 
-    The prompt instructs the agent to follow `GUIDE_TEXT`'s ingest workflow
-    and seeds the citation format using the source's exact filename so the
-    citation parser has a chance to link them.
+# ── MCP server config ────────────────────────────────────────────────────
+
+def _mcp_server_config(workspace: str):
+    """Build the inline MCP server config for the agent.
+
+    Mirrors the user's `.cursor/mcp.json` so the agent talks to the same
+    local server (and same workspace) the user is debugging against.
+    Computes paths from this file's location to avoid environment-specific
+    hardcoding. Uses the SDK's typed `StdioMcpServerConfig` rather than a raw
+    dict so any schema drift surfaces at the SDK boundary, not at runtime.
     """
+    from cursor_sdk import StdioMcpServerConfig
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return {
+        "llmwiki": StdioMcpServerConfig(
+            command=sys.executable,
+            args=[str(repo_root / "llmwiki"), "mcp", workspace],
+        )
+    }
+
+
+# ── DB helpers ───────────────────────────────────────────────────────────
+
+async def _lookup_doc(db, doc_id: str) -> dict | None:
+    """Fetch the document row by id. Returns None if missing."""
+    cursor = await db.execute(
+        "SELECT id, filename, title, relative_path, path, file_type, page_count, status "
+        "FROM documents WHERE id = ?",
+        (doc_id,),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row))
+
+
+async def _get_backlinks(db, doc_id: str) -> list[dict]:
+    """Wiki pages that cite the given document. Drives blast-radius display."""
+    cursor = await db.execute(
+        "SELECT d.id, d.path, d.filename, d.title, dr.reference_type "
+        "FROM document_references dr "
+        "JOIN documents d ON dr.source_document_id = d.id "
+        "WHERE dr.target_document_id = ? "
+        "  AND d.status != 'failed' "
+        "  AND COALESCE(d.archived, 0) = 0 "
+        "ORDER BY d.path, d.filename",
+        (doc_id,),
+    )
+    rows = await cursor.fetchall()
+    cols = [c[0] for c in cursor.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+# ── Prompt builders ──────────────────────────────────────────────────────
+
+def _build_ingest_prompt(doc: dict, kb_slug: str) -> str:
     filename = doc["filename"]
     title = doc.get("title") or filename
     relative = doc.get("relative_path") or filename
@@ -92,35 +148,47 @@ def _build_prompt(doc: dict, kb_slug: str) -> str:
     )
 
 
-def _mcp_server_config(workspace: str):
-    """Build the inline MCP server config for the agent.
+def _build_deprecate_prompt(doc: dict, kb_slug: str, citing: list[dict]) -> str:
+    filename = doc["filename"]
+    title = doc.get("title") or filename
+    relative = doc.get("relative_path") or filename
+    citing_lines = "\n".join(
+        f"- `{c['path']}{c['filename']}` ({c.get('title') or c['filename']}) — {c.get('reference_type', 'cites')}"
+        for c in citing
+    )
 
-    Mirrors the user's `.cursor/mcp.json` so the agent talks to the same
-    local server (and same workspace) the user is debugging against.
-    Computes paths from this file's location to avoid environment-specific
-    hardcoding. Uses the SDK's typed `StdioMcpServerConfig` rather than a raw
-    dict so any schema drift surfaces at the SDK boundary, not at runtime.
-    """
-    from cursor_sdk import StdioMcpServerConfig
+    return (
+        f"A source is being removed from the `{kb_slug}` wiki:\n\n"
+        f"- filename: `{filename}`\n"
+        f"- title: {title}\n"
+        f"- workspace path: `/{relative}`\n\n"
+        f"This source is currently cited by {len(citing)} wiki page(s):\n"
+        f"{citing_lines}\n\n"
+        "Update the wiki to reflect the removal:\n\n"
+        f"1. Call `guide` first to refresh on the doctrine.\n"
+        f"2. If you need the source's content for context (to decide what to keep "
+        f"in citing pages), call `read(knowledge_base=\"{kb_slug}\", path=\"/{relative}\")`.\n"
+        "3. For each citing page, decide:\n"
+        "   - **rewrite** if the page stands without this source: `edit` to remove the citation "
+        "and any sentences that solely depended on it. Update the frontmatter `date`.\n"
+        "   - **archive** if the page exists only because of this source: `delete` it.\n"
+        "4. `edit` `/wiki/overview.md` to decrement source count and add a recent-updates entry "
+        "noting the removal.\n"
+        f"5. `append` a deprecate entry to `/wiki/log.md`: header `## [YYYY-MM-DD] deprecate | {filename}` "
+        "with bullets describing what was rewritten, what was archived, and why.\n\n"
+        "After your edits complete, the source itself will be deleted by the system. "
+        "Do not call `delete` on the source — focus on the wiki side."
+    )
 
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    return {
-        "llmwiki": StdioMcpServerConfig(
-            command=sys.executable,
-            args=[str(repo_root / "llmwiki"), "mcp", workspace],
-        )
-    }
 
-
-# ── SDK message → IngestEvent mapping ────────────────────────────────────
+# ── SDK message → AgentEvent mapping ─────────────────────────────────────
 
 def _serialize_block(block: Any) -> dict[str, Any]:
     """Best-effort conversion of an SDK content block into a JSON-friendly dict.
 
-    SDK message shapes are stable for the common types (`text`, `tool_use`,
-    `tool_result`) but the safest assumption for a UI-streaming layer is
-    that new types will appear. Unknown shapes are stringified rather than
-    dropped.
+    Common types (`text`, `tool_use`, `tool_result`) get typed projections;
+    unknown shapes are stringified rather than dropped so server-side SDK
+    additions don't require a UI deploy.
     """
     btype = getattr(block, "type", None)
     if btype == "text":
@@ -145,11 +213,11 @@ def _serialize_block(block: Any) -> dict[str, Any]:
     return {"type": btype or "unknown", "repr": repr(block)[:500]}
 
 
-def _message_to_event(message: Any) -> IngestEvent | None:
-    """Convert an SDK SDKMessage into an IngestEvent, or None to drop it.
+def _message_to_event(message: Any) -> AgentEvent | None:
+    """Convert an SDK SDKMessage into an AgentEvent, or None to drop it.
 
-    We surface assistant messages (text + tool calls) and skip system /
-    user-echo messages — those are noise for a progress panel.
+    Surfaces only assistant messages (text + tool calls); system / user-echo
+    messages are noise for a progress panel.
     """
     mtype = getattr(message, "type", None)
     if mtype != "assistant":
@@ -159,59 +227,32 @@ def _message_to_event(message: Any) -> IngestEvent | None:
         return None
     blocks_raw = getattr(inner, "content", []) or []
     blocks = [_serialize_block(b) for b in blocks_raw]
-    return IngestEvent("assistant", {"blocks": blocks})
+    return AgentEvent("assistant", {"blocks": blocks})
 
 
-# ── Public entry point ───────────────────────────────────────────────────
+# ── Generic agent runner ─────────────────────────────────────────────────
 
-async def run_ingest(
-    db,
-    doc_id: str,
+async def _run_agent(
+    *,
     workspace: str,
-    kb_slug: str,
-) -> AsyncIterator[IngestEvent]:
-    """Drive the ingest agent for one document, yielding events as they arrive.
+    doc_id: str,
+    filename: str,
+    prompt: str,
+    post_run_hook: Callable[[bool], Awaitable[None]] | None = None,
+) -> AsyncIterator[AgentEvent]:
+    """Drive one Cursor SDK agent run, yielding events as they arrive.
 
-    Failure modes are surfaced as terminal `error` events rather than thrown:
-    the route layer streams events to the UI and an unhandled exception mid-
-    stream would just truncate the SSE without the user seeing why.
+    `post_run_hook(success)` runs once after the SDK contexts close — `success`
+    is True when the run's terminal status is `finished`. Hook failures are
+    surfaced as `error` events but never propagate; the agent itself is
+    already disposed by the time the hook runs.
     """
-    if not settings.CURSOR_API_KEY:
-        yield IngestEvent("error", {
-            "phase": "config",
-            "message": "CURSOR_API_KEY is not set. Add it to .env to enable the ingest agent.",
-        })
-        return
-
-    cursor = await db.execute(
-        "SELECT id, filename, title, relative_path, file_type, page_count, status "
-        "FROM documents WHERE id = ?",
-        (doc_id,),
-    )
-    row = await cursor.fetchone()
-    if not row:
-        yield IngestEvent("error", {"phase": "lookup", "message": f"Document {doc_id} not found"})
-        return
-
-    cols = [d[0] for d in cursor.description]
-    doc = dict(zip(cols, row))
-
-    if doc.get("status") not in ("ready", None):
-        yield IngestEvent("error", {
-            "phase": "lookup",
-            "message": (
-                f"Document is `{doc.get('status')}`. Wait for processing to finish "
-                "before ingesting with the agent."
-            ),
-        })
-        return
-
     try:
         from cursor_sdk import (
             AsyncClient, AsyncAgent, AgentOptions, LocalAgentOptions, CursorAgentError,
         )
     except ImportError as e:
-        yield IngestEvent("error", {
+        yield AgentEvent("error", {
             "phase": "import",
             "message": f"cursor-sdk not installed: {e}. Run `pip install cursor-sdk`.",
         })
@@ -219,18 +260,16 @@ async def run_ingest(
 
     lock = _lock_for(workspace)
     if lock.locked():
-        yield IngestEvent("queued", {"message": "Another ingest is in flight for this workspace; waiting..."})
+        yield AgentEvent("queued", {"message": "Another agent run is in flight for this workspace; waiting..."})
+
+    mcp_servers = _mcp_server_config(workspace)
 
     async with lock:
-        prompt = _build_prompt(doc, kb_slug)
-        mcp_servers = _mcp_server_config(workspace)
-        yield IngestEvent("starting", {"workspace": workspace, "doc_id": doc_id, "filename": doc["filename"]})
+        yield AgentEvent("starting", {"workspace": workspace, "doc_id": doc_id, "filename": filename})
 
+        terminal_status: str | None = None
         try:
             async with await AsyncClient.launch_bridge(workspace=workspace) as client:
-                # AgentOptions carries `mcp_servers`; the create_agent kwargs
-                # surface intentionally doesn't expose it, only `model`/`local`/
-                # `cloud`/etc. Pass the full options object positionally.
                 options = AgentOptions(
                     model=settings.AGENT_MODEL,
                     api_key=settings.CURSOR_API_KEY,
@@ -239,12 +278,12 @@ async def run_ingest(
                 )
                 async with await AsyncAgent.create(options, client=client) as agent:
                     agent_id = getattr(agent, "agent_id", None)
-                    yield IngestEvent("agent_created", {"agent_id": agent_id})
+                    yield AgentEvent("agent_created", {"agent_id": agent_id})
 
                     run = await agent.send(prompt)
                     run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
-                    logger.info("Ingest run started: agent_id=%s run_id=%s doc=%s", agent_id, run_id, doc_id)
-                    yield IngestEvent("run_started", {"run_id": run_id})
+                    logger.info("Agent run started: agent_id=%s run_id=%s doc=%s", agent_id, run_id, doc_id)
+                    yield AgentEvent("run_started", {"run_id": run_id})
 
                     async for message in run.messages():
                         event = _message_to_event(message)
@@ -252,30 +291,166 @@ async def run_ingest(
                             yield event
 
                     result = await run.wait()
-                    status = getattr(result, "status", "unknown")
-                    yield IngestEvent("finished", {
-                        "status": status,
+                    terminal_status = getattr(result, "status", "unknown")
+                    yield AgentEvent("finished", {
+                        "status": terminal_status,
                         "run_id": run_id,
                         "agent_id": agent_id,
                     })
 
         except CursorAgentError as e:
-            logger.exception("Ingest agent failed to start")
-            yield IngestEvent("error", {
+            logger.exception("Agent failed to start")
+            yield AgentEvent("error", {
                 "phase": "startup",
                 "message": str(e),
                 "retryable": getattr(e, "is_retryable", False),
             })
         except Exception as e:
-            logger.exception("Ingest agent crashed mid-run")
-            yield IngestEvent("error", {
+            logger.exception("Agent crashed mid-run")
+            yield AgentEvent("error", {
                 "phase": "runtime",
                 "message": f"{type(e).__name__}: {e}",
             })
 
+        if post_run_hook is not None:
+            success = terminal_status == "finished"
+            try:
+                await post_run_hook(success)
+            except Exception as e:
+                logger.exception("Post-run hook failed")
+                yield AgentEvent("error", {
+                    "phase": "post_run",
+                    "message": f"Post-run cleanup failed: {type(e).__name__}: {e}",
+                })
 
-def event_to_sse(event: IngestEvent) -> str:
-    """Serialize one IngestEvent into an SSE `data:` line.
+
+# ── Public entry points ──────────────────────────────────────────────────
+
+async def run_ingest(
+    db,
+    doc_id: str,
+    workspace: str,
+    kb_slug: str,
+) -> AsyncIterator[AgentEvent]:
+    """Agent-driven ingest of a freshly-uploaded source into the wiki."""
+    if not settings.CURSOR_API_KEY:
+        yield AgentEvent("error", {
+            "phase": "config",
+            "message": "CURSOR_API_KEY is not set. Add it to .env to enable the agent.",
+        })
+        return
+
+    doc = await _lookup_doc(db, doc_id)
+    if not doc:
+        yield AgentEvent("error", {"phase": "lookup", "message": f"Document {doc_id} not found"})
+        return
+
+    if doc.get("status") not in ("ready", None):
+        yield AgentEvent("error", {
+            "phase": "lookup",
+            "message": (
+                f"Document is `{doc.get('status')}`. Wait for processing to finish "
+                "before ingesting with the agent."
+            ),
+        })
+        return
+
+    prompt = _build_ingest_prompt(doc, kb_slug)
+    async for event in _run_agent(
+        workspace=workspace,
+        doc_id=doc_id,
+        filename=doc["filename"],
+        prompt=prompt,
+    ):
+        yield event
+
+
+async def run_deprecate(
+    db,
+    doc_id: str,
+    workspace: str,
+    kb_slug: str,
+    document_service,
+) -> AsyncIterator[AgentEvent]:
+    """Agent-driven removal of a source: update citing wiki pages, then delete.
+
+    Fast-path: if the source has no citing wiki pages, skip the agent entirely
+    and delete directly. The agent is doing real cognitive work only when the
+    wiki actually depends on this source.
+    """
+    if not settings.CURSOR_API_KEY:
+        yield AgentEvent("error", {
+            "phase": "config",
+            "message": "CURSOR_API_KEY is not set. Add it to .env to enable the agent.",
+        })
+        return
+
+    doc = await _lookup_doc(db, doc_id)
+    if not doc:
+        yield AgentEvent("error", {"phase": "lookup", "message": f"Document {doc_id} not found"})
+        return
+
+    if doc.get("path", "/").startswith("/wiki/"):
+        yield AgentEvent("error", {
+            "phase": "lookup",
+            "message": "This is a wiki page, not a source. Use the wiki UI to edit or delete it.",
+        })
+        return
+
+    citing = await _get_backlinks(db, doc_id)
+    yield AgentEvent("blast_radius", {
+        "citing_count": len(citing),
+        "citing": [
+            {"id": c["id"], "path": c["path"], "filename": c["filename"], "title": c.get("title")}
+            for c in citing
+        ],
+    })
+
+    # Fast-path: nothing in the wiki depends on this source. Skip the agent and
+    # delete directly. The user explicitly accepted this asymmetry — the agent
+    # has nothing to think about and the wait would be pure overhead.
+    if not citing:
+        yield AgentEvent("starting", {
+            "workspace": workspace, "doc_id": doc_id, "filename": doc["filename"],
+            "fast_path": True,
+        })
+        try:
+            await document_service.delete(doc_id)
+        except Exception as e:
+            logger.exception("Fast-path delete failed")
+            yield AgentEvent("error", {
+                "phase": "delete",
+                "message": f"Failed to delete source: {type(e).__name__}: {e}",
+            })
+            return
+        yield AgentEvent("finished", {"status": "finished", "fast_path": True})
+        return
+
+    prompt = _build_deprecate_prompt(doc, kb_slug, citing)
+
+    async def _post_run(success: bool) -> None:
+        if not success:
+            logger.warning(
+                "Skipping source delete because agent run did not finish cleanly (doc_id=%s)",
+                doc_id,
+            )
+            return
+        await document_service.delete(doc_id)
+
+    async for event in _run_agent(
+        workspace=workspace,
+        doc_id=doc_id,
+        filename=doc["filename"],
+        prompt=prompt,
+        post_run_hook=_post_run,
+    ):
+        yield event
+
+
+# ── SSE serialization ────────────────────────────────────────────────────
+
+def event_to_sse(event: AgentEvent) -> str:
+    """Serialize one AgentEvent into an SSE `data:` line.
 
     Kept here next to the producer so any future event-shape change is
     visible at one site rather than scattered between the runner and the
