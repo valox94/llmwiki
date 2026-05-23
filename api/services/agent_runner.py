@@ -98,14 +98,18 @@ async def _lookup_doc(db, doc_id: str) -> dict | None:
 
 
 async def _get_backlinks(db, doc_id: str) -> list[dict]:
-    """Wiki pages that cite the given document. Drives blast-radius display."""
+    """Wiki pages that cite the given document. Drives blast-radius display.
+
+    Local-mode SQLite hard-deletes archived docs (no `archived` column), so
+    filtering out archived rows is unnecessary — they're already gone. Mirrors
+    the query shape in `mcp/vaultfs/sqlite.py:get_backlinks`.
+    """
     cursor = await db.execute(
         "SELECT d.id, d.path, d.filename, d.title, dr.reference_type "
         "FROM document_references dr "
         "JOIN documents d ON dr.source_document_id = d.id "
         "WHERE dr.target_document_id = ? "
         "  AND d.status != 'failed' "
-        "  AND COALESCE(d.archived, 0) = 0 "
         "ORDER BY d.path, d.filename",
         (doc_id,),
     )
