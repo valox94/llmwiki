@@ -8,7 +8,8 @@ import {
   ChevronLeft, ChevronRight, ArrowUp, ArrowDown, MoreHorizontal,
   Image, Sheet, Presentation, FileCode, Search, X, Download, Sparkles,
 } from 'lucide-react'
-import { AgentIngestPanel } from './AgentIngestPanel'
+import { AgentRunPanel, type AgentAction } from './AgentRunPanel'
+import { DeprecateDialog } from './DeprecateDialog'
 import {
   ContextMenu, ContextMenuTrigger, ContextMenuContent,
   ContextMenuItem, ContextMenuSeparator,
@@ -129,6 +130,11 @@ interface FilesGridProps {
   onCreateFolder: (name: string, parentPath: string) => void
   onMoveDocument?: (docId: string, targetPath: string) => void
   onUploadFiles?: (files: File[], targetPath: string) => void
+  /** Pure local-state cleanup after the agent's post-run hook deletes a
+   *  source. Distinct from `onDeleteDocument` (which fires DELETE itself);
+   *  here the server-side deletion has already happened via the agent and
+   *  we only need to reconcile the doc list. */
+  onDocumentRemoved?: (id: string) => void
   /** If set, open this doc on mount (e.g. from a citation click) */
   initialDocId?: string | null
   initialPage?: number
@@ -151,6 +157,7 @@ export function FilesGrid({
   onCreateFolder,
   onMoveDocument,
   onUploadFiles,
+  onDocumentRemoved,
   initialDocId,
   initialPage,
   initialPath,
@@ -192,8 +199,35 @@ export function FilesGrid({
   const [folderDialogOpen, setFolderDialogOpen] = React.useState(false)
   const [folderName, setFolderName] = React.useState('')
 
-  // Agent-driven ingest: when set, the panel is open against this source doc.
-  const [ingestDoc, setIngestDoc] = React.useState<{ id: string; filename: string } | null>(null)
+  // Agent run panel state. `action` distinguishes ingest vs deprecate; the
+  // panel itself is the single rendering site for both flows.
+  const [agentRun, setAgentRun] = React.useState<{ action: AgentAction; id: string; filename: string } | null>(null)
+  // Deprecate confirmation dialog (precedes the agent run; gates the user on
+  // seeing the blast radius).
+  const [deprecateTarget, setDeprecateTarget] = React.useState<{ id: string; filename: string } | null>(null)
+
+  // Wraps the card-level delete callback. For source documents (everything in
+  // this grid by construction — wiki is filtered out at line 208), route the
+  // delete through the deprecate-with-agent flow instead of firing DELETE
+  // directly.
+  const handleSourceDelete = React.useCallback((docId: string) => {
+    const doc = documents.find((d) => d.id === docId)
+    if (!doc) {
+      onDeleteDocument(docId)
+      return
+    }
+    setDeprecateTarget({ id: docId, filename: doc.filename })
+  }, [documents, onDeleteDocument])
+
+  const handleAgentFinished = React.useCallback(() => {
+    if (!agentRun) return
+    if (agentRun.action === 'deprecate') {
+      // Source has been deleted by the agent's post-run hook. Reconcile UI:
+      // close the viewer if it's showing the deleted doc, drop the row.
+      if (activeDocId === agentRun.id) setActiveDocId(null)
+      onDocumentRemoved?.(agentRun.id)
+    }
+  }, [agentRun, activeDocId, onDocumentRemoved])
 
   // Note editor instance (for rendering formatting buttons in the toolbar)
   const [noteEditor, setNoteEditor] = React.useState<Editor | null>(null)
@@ -543,18 +577,30 @@ export function FilesGrid({
               <Search className="size-3.5" />
             </button>
             <button
-              onClick={() => setIngestDoc({ id: activeDoc.id, filename: activeDoc.filename })}
-              disabled={activeDoc.status !== 'ready' || ingestDoc?.id === activeDoc.id}
+              onClick={() => setAgentRun({ action: 'ingest', id: activeDoc.id, filename: activeDoc.filename })}
+              disabled={activeDoc.status !== 'ready' || agentRun?.id === activeDoc.id}
               className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               title={
                 activeDoc.status !== 'ready'
                   ? 'Wait for document processing to finish'
-                  : ingestDoc?.id === activeDoc.id
-                    ? 'Ingest already running'
-                    : 'Ingest with agent — agent reads this source and updates the wiki'
+                  : agentRun?.id === activeDoc.id
+                    ? 'Agent already running for this doc'
+                    : 'Ingest with agent — reads this source and updates the wiki'
               }
             >
               <Sparkles className="size-3.5" />
+            </button>
+            <button
+              onClick={() => setDeprecateTarget({ id: activeDoc.id, filename: activeDoc.filename })}
+              disabled={agentRun?.id === activeDoc.id}
+              className="p-1.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-md transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title={
+                agentRun?.id === activeDoc.id
+                  ? 'Agent already running for this doc'
+                  : 'Deprecate with agent — updates citing wiki pages, then deletes this source'
+              }
+            >
+              <Trash2 className="size-3.5" />
             </button>
             <a href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/v1/documents/${activeDoc.id}/download`} download className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors cursor-pointer" title="Download">
               <Download className="size-3.5" />
@@ -625,7 +671,7 @@ export function FilesGrid({
                         ))}
                         {filteredDocs.map((doc) => (
                           <motion.div key={doc.id} layout exit={{ opacity: 0, scale: 0.95 }} transition={{ layout: { duration: 0.15, ease: 'easeOut' }, opacity: { duration: 0.1 } }} className="h-full">
-                            <DocumentCard doc={doc} onOpen={() => openDoc(doc)} onDelete={() => onDeleteDocument(doc.id)} onRename={(t) => onRenameDocument(doc.id, t)} />
+                            <DocumentCard doc={doc} onOpen={() => openDoc(doc)} onDelete={() => handleSourceDelete(doc.id)} onRename={(t) => onRenameDocument(doc.id, t)} />
                           </motion.div>
                         ))}
                       </AnimatePresence>
@@ -658,11 +704,26 @@ export function FilesGrid({
         </div>
       )}
 
-      {ingestDoc && (
-        <AgentIngestPanel
-          docId={ingestDoc.id}
-          filename={ingestDoc.filename}
-          onClose={() => setIngestDoc(null)}
+      {deprecateTarget && (
+        <DeprecateDialog
+          docId={deprecateTarget.id}
+          filename={deprecateTarget.filename}
+          onCancel={() => setDeprecateTarget(null)}
+          onConfirm={() => {
+            const t = deprecateTarget
+            setDeprecateTarget(null)
+            setAgentRun({ action: 'deprecate', id: t.id, filename: t.filename })
+          }}
+        />
+      )}
+
+      {agentRun && (
+        <AgentRunPanel
+          action={agentRun.action}
+          docId={agentRun.id}
+          filename={agentRun.filename}
+          onClose={() => setAgentRun(null)}
+          onFinished={handleAgentFinished}
         />
       )}
     </div>

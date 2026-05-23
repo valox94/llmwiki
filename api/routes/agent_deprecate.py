@@ -15,9 +15,40 @@ from starlette.responses import StreamingResponse
 
 from config import settings
 from deps import get_user_id
-from services.agent_runner import event_to_sse, run_deprecate
+from services.agent_runner import _get_backlinks, _lookup_doc, event_to_sse, run_deprecate
 
 router = APIRouter(tags=["agent"])
+
+
+@router.get("/v1/agents/deprecate/{doc_id}/preview")
+async def preview_deprecate(
+    doc_id: str,
+    request: Request,
+    user_id: str = Depends(get_user_id),
+):
+    """Return the blast radius for a deprecate-with-agent action.
+
+    Used by the confirmation dialog so the user sees what wiki pages will be
+    affected before kicking off the run. Read-only; no side effects.
+    """
+    db = request.app.state.sqlite_db
+    doc = await _lookup_doc(db, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.get("path", "/").startswith("/wiki/"):
+        raise HTTPException(status_code=400, detail="This is a wiki page, not a source")
+
+    citing = await _get_backlinks(db, doc_id)
+    return {
+        "doc_id": doc_id,
+        "filename": doc["filename"],
+        "title": doc.get("title"),
+        "citing_count": len(citing),
+        "citing": [
+            {"id": c["id"], "path": c["path"], "filename": c["filename"], "title": c.get("title")}
+            for c in citing
+        ],
+    }
 
 
 @router.post("/v1/agents/deprecate/{doc_id}")

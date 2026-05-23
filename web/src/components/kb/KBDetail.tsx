@@ -565,6 +565,13 @@ export function KBDetail({ kbId, kbSlug, kbName, viewMode, routeFilesPath }: Pro
     } catch { toast.error('Failed to delete document') }
   }
 
+  // Pure local-state cleanup after the deprecate-with-agent flow has already
+  // deleted a source server-side. Distinct from `handleDeleteDocument`, which
+  // also fires the DELETE request.
+  const handleDocumentRemoved = React.useCallback((docId: string) => {
+    setDocuments((prev) => prev.filter((d) => d.id !== docId))
+  }, [])
+
   const handleRenameDocument = async (docId: string, newTitle: string) => {
     const t = getToken()
     if (!t) return
@@ -817,6 +824,7 @@ export function KBDetail({ kbId, kbSlug, kbName, viewMode, routeFilesPath }: Pro
                   key={kbId}
                   documents={documents}
                   onDeleteDocument={handleDeleteDocument}
+                  onDocumentRemoved={handleDocumentRemoved}
                   onRenameDocument={handleRenameDocument}
                   onUpload={handleUploadClick}
                   onCreateNote={handleCreateNote}
