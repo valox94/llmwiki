@@ -76,6 +76,13 @@ async def upload_file(
 
     doc_id = str(uuid.uuid4())
 
+    # Re-uploading the same workspace path replaces the derived index entry.
+    # The file on disk is the source of truth; SQLite can be rebuilt.
+    await db.execute(
+        "DELETE FROM documents WHERE user_id = ? AND relative_path = ?",
+        (user_id, relative),
+    )
+
     # Auto-assign document_number
     cursor = await db.execute("SELECT COALESCE(MAX(document_number), 0) + 1 FROM documents")
     row = await cursor.fetchone()

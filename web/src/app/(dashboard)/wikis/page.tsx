@@ -81,7 +81,7 @@ export default function WikisPage() {
   if (knowledgeBases.length === 0) {
     return (
       <div className="h-full flex flex-col">
-        <PageHeader onNew={() => setDialogOpen(true)} />
+        <PageHeader onNew={isLocal ? undefined : () => setDialogOpen(true)} />
         <div className="flex-1 flex flex-col items-center justify-center p-8">
           <div className="w-full max-w-2xl">
             <div className="text-center mb-12">
@@ -100,8 +100,10 @@ export default function WikisPage() {
               {[
                 {
                   step: '1',
-                  title: 'Create a wiki',
-                  desc: 'Name your knowledge space. You can have as many as you need.',
+                  title: isLocal ? 'Open your workspace' : 'Create a wiki',
+                  desc: isLocal
+                    ? 'Local mode uses the folder you started LLM Wiki with as this wiki.'
+                    : 'Name your knowledge space. You can have as many as you need.',
                 },
                 {
                   step: '2',
@@ -110,8 +112,8 @@ export default function WikisPage() {
                 },
                 {
                   step: '3',
-                  title: 'Ask Claude',
-                  desc: 'Claude reads your sources and compiles a wiki with cross-references and summaries.',
+                  title: 'Ask an MCP client',
+                  desc: 'Cursor, Claude, or another MCP client reads your sources and compiles the wiki.',
                 },
               ].map((item, i) => (
                 <motion.div
@@ -131,23 +133,27 @@ export default function WikisPage() {
             </div>
 
             <div className="flex flex-col items-center gap-3">
-              <button
-                onClick={handleQuickCreate}
-                disabled={creating}
-                className="inline-flex items-center justify-center gap-2.5 rounded-full bg-foreground text-background px-8 py-3 text-sm font-medium hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-50"
-              >
-                {creating ? (
-                  <><Loader2 size={15} className="animate-spin" /> Setting up...</>
-                ) : (
-                  <><Plus size={15} /> Get started</>
-                )}
-              </button>
-              <button
-                onClick={() => setDialogOpen(true)}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-              >
-                or create with a custom name
-              </button>
+              {!isLocal && (
+                <>
+                  <button
+                    onClick={handleQuickCreate}
+                    disabled={creating}
+                    className="inline-flex items-center justify-center gap-2.5 rounded-full bg-foreground text-background px-8 py-3 text-sm font-medium hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-50"
+                  >
+                    {creating ? (
+                      <><Loader2 size={15} className="animate-spin" /> Setting up...</>
+                    ) : (
+                      <><Plus size={15} /> Get started</>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setDialogOpen(true)}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                  >
+                    or create with a custom name
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -166,7 +172,7 @@ export default function WikisPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader onNew={() => setDialogOpen(true)} />
+      <PageHeader onNew={isLocal ? undefined : () => setDialogOpen(true)} />
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-8 py-6">
@@ -213,13 +219,15 @@ export default function WikisPage() {
               )
             })}
 
-            <button
-              onClick={() => setDialogOpen(true)}
-              className="flex flex-col items-center justify-center gap-2 p-5 rounded-xl border border-dashed border-border hover:border-primary/50 hover:bg-accent/30 transition-colors cursor-pointer min-h-[112px]"
-            >
-              <Plus size={16} className="text-muted-foreground" />
-              <span className="text-xs text-muted-foreground">New Wiki</span>
-            </button>
+            {!isLocal && (
+              <button
+                onClick={() => setDialogOpen(true)}
+                className="flex flex-col items-center justify-center gap-2 p-5 rounded-xl border border-dashed border-border hover:border-primary/50 hover:bg-accent/30 transition-colors cursor-pointer min-h-[112px]"
+              >
+                <Plus size={16} className="text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">New Wiki</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -47,7 +47,7 @@ def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict:
 
 async def create_pool(db_path: str) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
-    db.row_factory = None
+    db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
     schema = _SCHEMA_PATH.read_text()
@@ -101,10 +101,11 @@ class SQLiteDocumentRepository:
     async def find_by_path(
         self, kb_id: str, user_id: str, filename: str, path: str,
     ) -> dict | None:
+        relative_path = (path.rstrip("/") + "/" + filename).lstrip("/")
         cursor = await self._db.execute(
-            "SELECT * FROM documents WHERE knowledge_base_id = ? AND user_id = ? "
-            "AND filename = ? AND path = ? AND NOT archived",
-            (kb_id, user_id, filename, path),
+            "SELECT * FROM documents WHERE user_id = ? AND relative_path = ? "
+            "AND status != 'failed'",
+            (user_id, relative_path),
         )
         row = await cursor.fetchone()
         return _row_to_dict(cursor, row) if row else None
@@ -198,7 +199,8 @@ class SQLiteDocumentRepository:
 
     async def get_by_source_url(self, url: str) -> dict | None:
         cursor = await self._db.execute(
-            "SELECT id, knowledge_base_id, title, path, filename, version, highlights "
+            "SELECT id, (SELECT id FROM workspace LIMIT 1) as knowledge_base_id, "
+            "title, path, filename, version, highlights "
             "FROM documents "
             "WHERE status != 'failed' "
             "AND json_extract(metadata, '$.source_url') = ? "

@@ -74,7 +74,13 @@ class LocalKBService(KBService):
     async def create(self, name: str, description: str | None) -> dict:
         kbs = await self.list()
         if kbs:
-            return kbs[0]
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Local mode supports one wiki per workspace. "
+                    "Start LLM Wiki with a different folder to create another wiki."
+                ),
+            )
         raise HTTPException(status_code=400, detail="No workspace initialized")
 
     async def update(self, kb_id: str, name: str | None, description: str | None) -> dict | None:

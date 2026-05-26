@@ -8,6 +8,8 @@ import { Command, CommandInput, CommandList, CommandItem, CommandEmpty, CommandG
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { useKBStore } from '@/stores'
 
+const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
+
 export function WikiSelector({ kbName, kbId }: { kbName: string; kbId: string }) {
   const router = useRouter()
   const knowledgeBases = useKBStore((s) => s.knowledgeBases)
@@ -115,26 +117,30 @@ export function WikiSelector({ kbName, kbId }: { kbName: string; kbId: string })
                       <Pencil className="size-3.5 mr-2" />
                       Rename
                     </CommandItem>
-                    <CommandItem
-                      onSelect={() => {
-                        setOpen(false)
-                        setDeleteDialogOpen(true)
-                      }}
-                      className="text-destructive"
-                    >
-                      <Trash2 className="size-3.5 mr-2" />
-                      Delete
-                    </CommandItem>
-                    <CommandSeparator />
-                    <CommandItem
-                      onSelect={() => {
-                        setOpen(false)
-                        setCreateDialogOpen(true)
-                      }}
-                    >
-                      <Plus className="size-3.5 mr-2" />
-                      Create Wiki
-                    </CommandItem>
+                    {!isLocal && (
+                      <>
+                        <CommandItem
+                          onSelect={() => {
+                            setOpen(false)
+                            setDeleteDialogOpen(true)
+                          }}
+                          className="text-destructive"
+                        >
+                          <Trash2 className="size-3.5 mr-2" />
+                          Delete
+                        </CommandItem>
+                        <CommandSeparator />
+                        <CommandItem
+                          onSelect={() => {
+                            setOpen(false)
+                            setCreateDialogOpen(true)
+                          }}
+                        >
+                          <Plus className="size-3.5 mr-2" />
+                          Create Wiki
+                        </CommandItem>
+                      </>
+                    )}
                   </CommandGroup>
                 </>
               )}

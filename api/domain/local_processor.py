@@ -162,6 +162,16 @@ async def _process_pdf(db: aiosqlite.Connection, doc_id: str, file_path: Path, w
     if settings.PDF_BACKEND == "mistral" and settings.MISTRAL_API_KEY:
         await _process_pdf_mistral(db, doc_id, file_path, workspace)
     else:
+        if not shutil.which("java"):
+            await db.execute(
+                "UPDATE documents SET status = 'ready', parser = 'raw-pdf', "
+                "error_message = 'PDF text extraction skipped: Java is not installed. "
+                "Install Java or configure Mistral OCR to index PDF contents.', "
+                "updated_at = datetime('now') WHERE id = ?",
+                (doc_id,),
+            )
+            await db.commit()
+            return
         pages_with_images = await asyncio.to_thread(extract_pdf, str(file_path))
         page_elements = _save_local_images(doc_id, workspace, pages_with_images)
         page_contents = [(num, md) for num, md, _ in pages_with_images]

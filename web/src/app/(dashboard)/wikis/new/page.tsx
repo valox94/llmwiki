@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { useKBStore } from '@/stores'
 import { Loader2 } from 'lucide-react'
 
+const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
+
 export default function NewKnowledgeBasePage() {
   const [name, setName] = React.useState('')
   const [description, setDescription] = React.useState('')
@@ -12,6 +14,26 @@ export default function NewKnowledgeBasePage() {
   const [error, setError] = React.useState('')
   const router = useRouter()
   const createKB = useKBStore((s) => s.createKB)
+
+  if (isLocal) {
+    return (
+      <div className="max-w-md mx-auto p-8">
+        <h1 className="text-xl font-semibold tracking-tight">Local Workspace Wiki</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Local mode supports one wiki per workspace folder. To create another wiki,
+          start LLM Wiki with a different folder or add another MCP server scoped to
+          that folder.
+        </p>
+        <button
+          type="button"
+          onClick={() => router.push('/wikis')}
+          className="mt-6 w-full rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer"
+        >
+          Back to wiki
+        </button>
+      </div>
+    )
+  }
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
